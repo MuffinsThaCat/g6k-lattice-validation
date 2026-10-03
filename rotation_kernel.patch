@@ -1,6 +1,6 @@
 --- a/kernel/siever.h
 +++ b/kernel/siever.h
-@@ -522,6 +522,19 @@
+@@ -522,6 +522,21 @@
      // An entry x is put into the bucket with center c if |<x,c>| > alpha * |x| * |c|
      void bgj1_sieve(double alpha); // in bgj1_sieve.cpp
  
@@ -11,10 +11,12 @@
 +    // x*M, x*M^2, ... x*M^(order-1). order == 0 switches the feature off.
 +    void set_rotation(const long* M, unsigned int order, double clone_below);
 +    unsigned long rotation_clones_added() const { return rot_clones_added.load(); }
++    unsigned long rotation_clones_attempted() const { return rot_clones_attempted.load(); }
 +    std::vector<int64_t> rot_M;
 +    unsigned int rot_order = 0;
 +    double rot_clone_below = 0.0;
 +    std::atomic<unsigned long> rot_clones_added{0};
++    std::atomic<unsigned long> rot_clones_attempted{0}; // every clone built (cost incurred), incl. uid duplicates
 +    void bgj1_add_rotation_clones(Entry const &src, std::vector<Entry>& transaction_db);
 +
      bool bdgl_sieve(size_t buckets, size_t blocks, size_t multi_hash); // in bdgl_sieve.cpp
@@ -22,13 +24,14 @@
      // runs a multi-threaded gauss-triple-sieve.
 --- a/kernel/bgj1_sieve.cpp
 +++ b/kernel/bgj1_sieve.cpp
-@@ -124,6 +124,44 @@
+@@ -124,6 +124,46 @@
      return;
  }
  
 +void Siever::set_rotation(const long* M, unsigned int order, double clone_below)
 +{
 +    rot_clones_added = 0;
++    rot_clones_attempted = 0;
 +    rot_order = 0;
 +    rot_M.clear();
 +    if (order == 0 || M == nullptr) return;
@@ -58,6 +61,7 @@
 +        e.x = src.x;
 +        for (unsigned int j = 0; j < n; ++j) e.x[j] = static_cast<ZT>(cur[j]);
 +        recompute_data_for_entry<Recompute::recompute_all_and_consider_otf_lift>(e);
++        ++rot_clones_attempted;
 +        if (!uid_hash_table.insert_uid(e.uid)) continue;
 +        transaction_db.push_back(e);
 +        ++rot_clones_added;
@@ -67,7 +71,7 @@
  // Worker task for bgj1 sieve. The parameter tn is equal to n if it is >= 0.
  template <int tn>
  void Siever::bgj1_sieve_task(double alpha)
-@@ -335,6 +373,11 @@
+@@ -335,6 +375,11 @@
                  transaction_db.pop_back();
                  return false;
              }
@@ -81,18 +85,19 @@
          else
 --- a/g6k/decl.pxd
 +++ b/g6k/decl.pxd
-@@ -237,6 +237,8 @@
+@@ -237,6 +237,9 @@
          void gauss_sieve() # uses default max_db_size
          bool nv_sieve()
          void bgj1_sieve(double alpha)
 +        void set_rotation(const long* M, unsigned int order, double clone_below)
 +        unsigned long rotation_clones_added()
++        unsigned long rotation_clones_attempted()
          void bdgl_sieve(size_t nr_buckets, size_t blocks, size_t multi_hash)
  
          void hk3_sieve(double alpha)
 --- a/g6k/siever.pyx
 +++ b/g6k/siever.pyx
-@@ -1607,7 +1607,31 @@
+@@ -1607,7 +1607,35 @@
              lll_(m-l, m-l, m-lp)
  
          self.update_gso(self.ll, self.r)
@@ -120,6 +125,10 @@
 +    @property
 +    def rotation_clones_added(self):
 +        return self._core.rotation_clones_added()
++
++    @property
++    def rotation_clones_attempted(self):
++        return self._core.rotation_clones_attempted()
 +
      def best_lifts(self):
          """
