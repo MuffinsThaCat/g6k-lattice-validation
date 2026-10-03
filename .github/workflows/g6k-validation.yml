@@ -1,0 +1,117 @@
+name: g6k-validation
+
+# Manual trigger only. Nothing runs until someone starts it.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "smoke = build + smoke test only (~30 min); full = also E1/E2 + rotation"
+        type: choice
+        options: [smoke, full]
+        default: smoke
+      betas:
+        description: "E1 block sizes"
+        default: "40,44,48,52,56"
+      seeds:
+        description: "Seeds per block size"
+        default: "3"
+      e1_budget_seconds:
+        description: "E1/E2 time budget (s); job limit is 6h"
+        default: "9000"
+
+defaults:
+  run:
+    # explicit shell => bash -e -o pipefail, so a failing script is not hidden behind `| tee`
+    shell: bash
+
+jobs:
+  validate:
+    # 22.04 on purpose: Python 3.10 (virtualenv seeds setuptools, which G6K's build needs) and no
+    # PEP 668 "externally-managed" pip errors. ubuntu-latest (24.04, Python 3.12) breaks both.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    env:
+      IN_BETAS: ${{ inputs.betas }}
+      IN_SEEDS: ${{ inputs.seeds }}
+      IN_BUDGET: ${{ inputs.e1_budget_seconds }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same Python as G6K's own CI (its tests.yml/bootstrap.yml use 3.10 on GitHub runners).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Machine info (AVX2 must be present)
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          nproc
+          free -g | head -2
+          grep -q -m1 avx2 /proc/cpuinfo && echo "AVX2 present" || { echo "NO AVX2"; exit 1; }
+
+      - name: Rotation math self-test (no G6K needed)
+        run: |
+          python3 -m pip install -q numpy
+          python3 rotation_orbit_check.py --selftest | tee selftest.log
+
+      - name: Build G6K with operation counters
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+
+      - name: Smoke run (counters must be non-NaN)
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            G6K_BETAS="40,42,44" G6K_SEEDS=2 G6K_SATS="0.5,0.7" G6K_E2_BETA=44 G6K_THREADS=1 \
+            G6K_OUT=../res_smoke.json python ../g6k_opcount_vs_walltime.py' 2>&1 | tee run_smoke.log
+
+      - name: E1/E2 single thread (scaling, ns/op, termination vs default saturation)
+        if: inputs.mode == 'full'
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            G6K_BETAS="$IN_BETAS" G6K_SEEDS="$IN_SEEDS" G6K_E2_BETA=48 G6K_THREADS=1 \
+            G6K_MAX_SECONDS="$IN_BUDGET" \
+            G6K_OUT=../res_t1.json python ../g6k_opcount_vs_walltime.py' 2>&1 | tee run_t1.log
+
+      - name: Planted-vector dimensions for free (see PREREGISTERED_CRITERIA.md, item D)
+        if: inputs.mode == 'full'
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            G6K_THREADS=1 G6K_MAX_SECONDS=9000 G6K_D4F_OUT=../res_d4f.json \
+            python ../g6k_d4f_planted.py' 2>&1 | tee run_d4f.log
+
+      - name: Rotation orbit check (database inflation)
+        if: inputs.mode == 'full'
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            for cfg in "20 193" "24 257" "26 257"; do set -- $cfg; \
+              ROT_D=$1 ROT_Q=$2 ROT_MS="1" ROT_THREADS=1 ROT_TIMEOUT=900 ROT_OUT=../res_rot_d$1.json \
+              python ../rotation_orbit_check.py; done' 2>&1 | tee run_rot.log
+
+      - name: In-sieve rotation A/B (patched kernel; base vs rotate-short vs rotate-all)
+        if: inputs.mode == 'full'
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            for cfg in "20 193" "24 257" "26 257"; do set -- $cfg; for sat in 0.5 1.0; do \
+              AB_D=$1 AB_Q=$2 AB_SAT=$sat AB_FACTORS="3.2" AB_SEEDS=3 AB_OUT=../res_ab_d$1_s$sat.json \
+              python ../rotation_sieve_ab.py; done; done' 2>&1 | tee run_ab.log
+
+      - name: Projected-block rotation test (module-aligned basis)
+        if: inputs.mode == 'full'
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            BT_DS="20,24,28" BT_SEEDS=3 BT_OUT=../res_block.json python ../rotation_block_test.py' 2>&1 | tee run_block.log
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g6k-validation-results
+          path: |
+            res_*.json
+            run_*.log
+            setup.log
+            selftest.log
