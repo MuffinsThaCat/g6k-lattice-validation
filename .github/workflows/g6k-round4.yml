@@ -1,0 +1,49 @@
+name: g6k-round4
+
+# Manual trigger only.  Criteria: PREREGISTERED_CRITERIA_R4.md (written before any of these runs).
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  r4:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        g: [2, 4, 8, 16, 32]
+    env:
+      TTS_D: 32
+      TTS_LATTICE: 1
+      TTS_MODES: rotall
+      TTS_GROUP: ${{ matrix.g }}
+      TTS_HOLDOUT_SEEDS: 16
+      TTS_TIMEOUT: 3000
+      TTS_NPROC: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build G6K (counters + rotation patch with clone counter)
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: Subgroup time-to-solution runs
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            timeout 19000 python ../rotation_tts.py' 2>&1 | tee run_g${{ matrix.g }}.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r4-g${{ matrix.g }}
+          path: |
+            res_tts_*.json
+            run_*.log
+      - name: Fail if the experiment crashed or wrote nothing
+        run: |
+          if grep -q "Traceback" run_g${{ matrix.g }}.log; then echo "EXPERIMENT CRASHED"; exit 1; fi
+          test -s res_tts_d32_lat1_g${{ matrix.g }}.json || { echo "NO RESULTS"; exit 1; }
