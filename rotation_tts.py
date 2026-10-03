@@ -20,23 +20,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 D = int(os.environ["TTS_D"])
 Q = int(os.environ.get("TTS_Q", "257"))
+GROUP = int(os.environ.get("TTS_GROUP", "0"))     # 0 = the full rotation group; else the subgroup of this order
 LAT = int(os.environ.get("TTS_LATTICE", "1"))   # seed of the random ring element h (which lattice)
 MODES = os.environ.get("TTS_MODES", "base,rot,rotmid,rotall").split(",")
 TUNE = os.environ.get("TTS_TUNE", "0") == "1"
 HOLDOUT = int(os.environ.get("TTS_HOLDOUT_SEEDS", "16"))
 NPROC = int(os.environ.get("TTS_NPROC", "4"))
 TIMEOUT = float(os.environ.get("TTS_TIMEOUT", "3000"))
-OUT = os.environ.get("TTS_OUT", f"res_tts_d{D}_lat{LAT}.json")
+OUT = os.environ.get("TTS_OUT", f"res_tts_d{D}_lat{LAT}" + (f"_g{GROUP}" if GROUP else "") + ".json")
 SAT = 0.5
 FACTOR = 3.2
 
 
-def child(q, d, mode, seed, lat):
+def child(q, d, mode, seed, lat, group):
     try:
         import rotation_sieve_ab as AB
         import rotation_orbit_check as R
         B0, P = R.ideal_basis(d, Q, lat)
-        q.put(AB.run_one(B0, P, FACTOR, mode, seed, sat=SAT))
+        q.put(AB.run_one(B0, P, FACTOR, mode, seed, sat=SAT, group=group))
     except BaseException as exc:  # report, never hide
         q.put({"error": f"{type(exc).__name__}: {exc}"[:300]})
 
@@ -54,7 +55,7 @@ def main():
         while pending and len(running) < NPROC:
             sset, mode, seed = pending.pop(0)
             q = ctx.Queue()
-            p = ctx.Process(target=child, args=(q, D, mode, seed, LAT))
+            p = ctx.Process(target=child, args=(q, D, mode, seed, LAT, GROUP))
             p.start()
             running.append((p, q, sset, mode, seed, time.time()))
         time.sleep(0.5)
@@ -78,7 +79,7 @@ def main():
             if not done:
                 still.append((p, q, sset, mode, seed, ts))
                 continue
-            r.update(set=sset, mode=mode, seed=seed, d=D, lat=LAT)
+            r.update(set=sset, mode=mode, seed=seed, d=D, lat=LAT, group=GROUP)
             rows.append(r)
             tag = "TIMEOUT" if r.get("timeout") else (r.get("error") or f"wall {r['wall']:.1f}s ops {r['ops']:.3g} clones {r['clones_attempted']}")
             print(f"[{time.time() - t0:7.0f}s] {sset:7} {mode:7} seed {seed}: {tag}", flush=True)
