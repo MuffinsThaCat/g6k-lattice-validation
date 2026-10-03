@@ -1,0 +1,102 @@
+name: g6k-round2
+
+# Manual trigger only.  Criteria: PREREGISTERED_CRITERIA_R2.md (written before any of these runs).
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tts:
+    # C': time to solution of clone-everything rotation variants, tuning (d=28) + holdout, one runner per dimension
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        d: [24, 28, 32, 36, 40]
+    env:
+      TTS_D: ${{ matrix.d }}
+      TTS_TUNE: ${{ matrix.d == 28 && '1' || '0' }}
+      TTS_HOLDOUT_SEEDS: ${{ matrix.d == 40 && '8' || '16' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Machine info
+        run: |
+          grep -m1 "model name" /proc/cpuinfo; nproc; free -g | head -2
+          grep -q -m1 avx2 /proc/cpuinfo || { echo "NO AVX2"; exit 1; }
+      - name: Build G6K (counters + rotation patch with clone counter)
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: Check the patched kernel exposes the clone counter
+        run: |
+          bash -c 'cd g6k && source ./activate && python -c "from g6k import Siever; assert hasattr(Siever, \"rotation_clones_attempted\"); print(\"clone counter present\")"'
+      - name: C' time-to-solution runs
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            TTS_NPROC=4 TTS_OUT=../res_tts_d${TTS_D}.json timeout 19000 python ../rotation_tts.py' 2>&1 | tee run_tts_d${TTS_D}.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tts-d${{ matrix.d }}
+          path: |
+            res_tts_*.json
+            run_tts_*.log
+            setup.log
+
+  d4f:
+    # D': Round 1's planted-vector run crashed in Babai; re-run with precision fallbacks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build G6K
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: D' planted-vector dimensions for free
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            G6K_THREADS=1 G6K_MAX_SECONDS=15000 G6K_D4F_OUT=../res_d4f.json \
+            timeout 19000 python ../g6k_d4f_planted.py' 2>&1 | tee run_d4f.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d4f
+          path: |
+            res_d4f.json
+            run_d4f.log
+
+  cbase:
+    # E': baseline chances c behind the Round 47 lift-amplification credit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build G6K (gives us fpylll in the venv)
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: E' measure c
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && python -m pip install -q scipy && \
+            CB_NPROC=4 CB_OUT=../res_c.json timeout 19000 python ../measure_c_baseline.py' 2>&1 | tee run_c.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cbase
+          path: |
+            res_c.json
+            run_c.log
