@@ -1,0 +1,65 @@
+name: g6k-round3
+
+# Manual trigger only.  Criteria: PREREGISTERED_CRITERIA_R3.md (written before any of these runs).
+# Unlike round 2 there is NO continue-on-error: a crashed experiment fails its job.
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  r3:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: base40, d: 40, lat: 1, modes: "base", seeds: 4, timeout: 17000}
+          - {name: big44, d: 44, lat: 1, modes: "rotall", seeds: 8, timeout: 7000}
+          - {name: big48, d: 48, lat: 1, modes: "rotall", seeds: 8, timeout: 7000}
+          - {name: lat2d28, d: 28, lat: 2, modes: "base,rotall", seeds: 8, timeout: 3000}
+          - {name: lat3d28, d: 28, lat: 3, modes: "base,rotall", seeds: 8, timeout: 3000}
+          - {name: lat4d28, d: 28, lat: 4, modes: "base,rotall", seeds: 8, timeout: 3000}
+          - {name: lat2d32, d: 32, lat: 2, modes: "base,rotall", seeds: 8, timeout: 3000}
+          - {name: lat3d32, d: 32, lat: 3, modes: "base,rotall", seeds: 8, timeout: 3000}
+          - {name: lat4d32, d: 32, lat: 4, modes: "base,rotall", seeds: 8, timeout: 3000}
+          - {name: lat2d36, d: 36, lat: 2, modes: "base,rotall", seeds: 8, timeout: 3000}
+          - {name: lat3d36, d: 36, lat: 3, modes: "base,rotall", seeds: 8, timeout: 3000}
+          - {name: lat4d36, d: 36, lat: 4, modes: "base,rotall", seeds: 8, timeout: 3000}
+    env:
+      TTS_D: ${{ matrix.d }}
+      TTS_LATTICE: ${{ matrix.lat }}
+      TTS_MODES: ${{ matrix.modes }}
+      TTS_HOLDOUT_SEEDS: ${{ matrix.seeds }}
+      TTS_TIMEOUT: ${{ matrix.timeout }}
+      TTS_NPROC: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Machine info
+        run: |
+          grep -m1 "model name" /proc/cpuinfo; nproc; free -g | head -2
+          grep -q -m1 avx2 /proc/cpuinfo || { echo "NO AVX2"; exit 1; }
+      - name: Build G6K (counters + rotation patch with clone counter)
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: Time-to-solution runs
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            TTS_OUT=../res_tts_d${TTS_D}_lat${TTS_LATTICE}.json timeout 19000 python ../rotation_tts.py' 2>&1 | tee run_${{ matrix.name }}.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r3-${{ matrix.name }}
+          path: |
+            res_tts_*.json
+            run_*.log
+      - name: Fail if the experiment crashed or wrote nothing
+        run: |
+          if grep -q "Traceback" run_${{ matrix.name }}.log; then echo "EXPERIMENT CRASHED"; exit 1; fi
+          test -s res_tts_d${TTS_D}_lat${TTS_LATTICE}.json || { echo "NO RESULTS"; exit 1; }
