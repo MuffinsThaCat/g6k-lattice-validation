@@ -1,0 +1,126 @@
+--- a/kernel/siever.h
++++ b/kernel/siever.h
+@@ -522,6 +522,19 @@
+     // An entry x is put into the bucket with center c if |<x,c>| > alpha * |x| * |c|
+     void bgj1_sieve(double alpha); // in bgj1_sieve.cpp
+ 
++    // ---- EXPERIMENTAL: ring-rotation augmentation of bgj1 (local test patch, not upstream) ----
++    // M is an n x n integer matrix (row-major, row-vector convention x' = x*M) implementing a norm-preserving
++    // automorphism of the lattice of order `order`; every new database vector shorter than `clone_below`
++    // (normalised squared length, same units as params.saturation_radius) is accompanied by its images
++    // x*M, x*M^2, ... x*M^(order-1). order == 0 switches the feature off.
++    void set_rotation(const long* M, unsigned int order, double clone_below);
++    unsigned long rotation_clones_added() const { return rot_clones_added.load(); }
++    std::vector<int64_t> rot_M;
++    unsigned int rot_order = 0;
++    double rot_clone_below = 0.0;
++    std::atomic<unsigned long> rot_clones_added{0};
++    void bgj1_add_rotation_clones(Entry const &src, std::vector<Entry>& transaction_db);
++
+     bool bdgl_sieve(size_t buckets, size_t blocks, size_t multi_hash); // in bdgl_sieve.cpp
+ 
+     // runs a multi-threaded gauss-triple-sieve.
+--- a/kernel/bgj1_sieve.cpp
++++ b/kernel/bgj1_sieve.cpp
+@@ -124,6 +124,44 @@
+     return;
+ }
+ 
++void Siever::set_rotation(const long* M, unsigned int order, double clone_below)
++{
++    rot_clones_added = 0;
++    rot_order = 0;
++    rot_M.clear();
++    if (order == 0 || M == nullptr) return;
++    rot_M.assign(M, M + static_cast<size_t>(n) * n);
++    rot_clone_below = clone_below;
++    rot_order = order;
++}
++
++// Append the rotation images x*M^k (k = 1..rot_order-1) of `src` to transaction_db. They have the same
++// length as `src`, so they are exactly as good as `src` for the database. Duplicates are rejected by
++// the uid hash table like any other new entry.
++void Siever::bgj1_add_rotation_clones(Entry const &src, std::vector<Entry>& transaction_db)
++{
++    std::array<int64_t, MAX_SIEVING_DIM> cur, nxt;
++    for (unsigned int i = 0; i < n; ++i) cur[i] = src.x[i];
++    for (unsigned int k = 1; k < rot_order; ++k)
++    {
++        for (unsigned int j = 0; j < n; ++j)
++        {
++            int64_t acc = 0;
++            for (unsigned int i = 0; i < n; ++i) acc += cur[i] * rot_M[static_cast<size_t>(i) * n + j];
++            if (acc > std::numeric_limits<ZT>::max() || acc < std::numeric_limits<ZT>::min()) return;
++            nxt[j] = acc;
++        }
++        cur = nxt;
++        Entry e;
++        e.x = src.x;
++        for (unsigned int j = 0; j < n; ++j) e.x[j] = static_cast<ZT>(cur[j]);
++        recompute_data_for_entry<Recompute::recompute_all_and_consider_otf_lift>(e);
++        if (!uid_hash_table.insert_uid(e.uid)) continue;
++        transaction_db.push_back(e);
++        ++rot_clones_added;
++    }
++}
++
+ // Worker task for bgj1 sieve. The parameter tn is equal to n if it is >= 0.
+ template <int tn>
+ void Siever::bgj1_sieve_task(double alpha)
+@@ -335,6 +373,11 @@
+                 transaction_db.pop_back();
+                 return false;
+             }
++            if (UNLIKELY(rot_order > 0) && new_entry.len < rot_clone_below)
++            {
++                Entry const src = new_entry; // copy: pushing clones may reallocate transaction_db
++                bgj1_add_rotation_clones(src, transaction_db);
++            }
+             return true;
+         }
+         else
+--- a/g6k/decl.pxd
++++ b/g6k/decl.pxd
+@@ -237,6 +237,8 @@
+         void gauss_sieve() # uses default max_db_size
+         bool nv_sieve()
+         void bgj1_sieve(double alpha)
++        void set_rotation(const long* M, unsigned int order, double clone_below)
++        unsigned long rotation_clones_added()
+         void bdgl_sieve(size_t nr_buckets, size_t blocks, size_t multi_hash)
+ 
+         void hk3_sieve(double alpha)
+--- a/g6k/siever.pyx
++++ b/g6k/siever.pyx
+@@ -1607,7 +1607,31 @@
+             lll_(m-l, m-l, m-lp)
+ 
+         self.update_gso(self.ll, self.r)
++
++    def set_rotation(self, M, order, clone_below=None):
++        """
++        EXPERIMENTAL (local test patch): make bgj1 insert, for every new database vector shorter than
++        ``clone_below`` (default: params.saturation_radius), its rotation images x*M^k, k < order.
++
++        :param M: n x n integer matrix (row-vector convention) of a norm-preserving lattice automorphism
++                  in the coordinates of the current sieve context
++        :param order: order of the rotation group; 0 switches the feature off
++        """
++        assert(self.initialized)
++        cdef np.ndarray Mc
++        if clone_below is None:
++            clone_below = self.params.saturation_radius
++        if order == 0 or M is None:
++            self._core.set_rotation(NULL, 0, 0.0)
++            return
++        Mc = npp.ascontiguousarray(M, dtype=npp.int64)
++        assert Mc.shape[0] == self.n and Mc.shape[1] == self.n
++        self._core.set_rotation(<const long*>Mc.data, <unsigned int>order, <double>clone_below)
+ 
++    @property
++    def rotation_clones_added(self):
++        return self._core.rotation_clones_added()
++
+     def best_lifts(self):
+         """
+         Output the best lift (conditioned on improving that Gram-Schmidt vector) at each position i
