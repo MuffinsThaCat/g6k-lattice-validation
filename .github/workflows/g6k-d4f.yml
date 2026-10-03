@@ -1,0 +1,39 @@
+name: g6k-d4f
+
+# Manual trigger only.  D' of PREREGISTERED_CRITERIA_R2.md, run on its own.
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  d4f:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build G6K
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: D' planted-vector dimensions for free
+        continue-on-error: true
+        run: |
+          bash -c 'cd g6k && source ./activate && \
+            G6K_THREADS=1 G6K_MAX_SECONDS=15000 G6K_D4F_OUT=../res_d4f.json \
+            timeout 19000 python ../g6k_d4f_planted.py' 2>&1 | tee run_d4f.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d4f
+          path: |
+            res_d4f.json
+            run_d4f.log
+      - name: Fail the job if the experiment crashed (continue-on-error hides this otherwise)
+        run: |
+          if grep -q "Traceback" run_d4f.log; then echo "EXPERIMENT CRASHED - see run_d4f.log"; exit 1; fi
+          test -s res_d4f.json || { echo "NO RESULTS WRITTEN"; exit 1; }
