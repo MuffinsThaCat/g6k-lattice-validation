@@ -121,7 +121,7 @@ def prereduce(B):
                 last = exc
         raise last
 
-    attempt(lambda ft: LLL.reduction(IM, float_type=ft))
+    LLL.reduction(IM)   # fpylll's LLL wrapper chooses its own precision and rejects an explicit float_type
     for bs in range(20, BPRE + 1, 4):
         attempt(lambda ft: BKZ.reduction(IM, BKZ.Param(block_size=bs, strategies=strat, max_loops=2,
                                                        flags=BKZ.MAX_LOOPS | BKZ.AUTO_ABORT), float_type=ft))
