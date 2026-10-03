@@ -36,7 +36,7 @@ D = int(os.environ.get("AB_D", "24"))
 Q = int(os.environ.get("AB_Q", "257"))
 FACTORS = [float(x) for x in os.environ.get("AB_FACTORS", "3.2,2.4,1.6,1.2").split(",")]
 SEEDS = int(os.environ.get("AB_SEEDS", "3"))
-MODES = os.environ.get("AB_MODES", "base,rot,rotall").split(",")
+MODES = os.environ.get("AB_MODES", "base,rot,rotall")   # also: rotmid.split(",")
 OUT = os.environ.get("AB_OUT", "rotation_sieve_ab_results.json")
 THREADS = int(os.environ.get("AB_THREADS", "1"))
 SAT = float(os.environ.get("AB_SAT", "0.5"))   # requested saturation ratio of the sieve
@@ -59,6 +59,8 @@ def run_one(B0, P, factor, mode, seed, sat=None, below=None):
         g.set_rotation(M, order, below)
     elif mode == "rot":          # clone new vectors shorter than G6K's saturation radius
         g.set_rotation(M, order)
+    elif mode == "rotmid":       # clone new vectors up to 1.5x G6K's saturation radius (pre-registered middle variant)
+        g.set_rotation(M, order, 1.5 * g.params.saturation_radius)
     elif mode == "rotall":       # clone EVERY new database vector (amplifies a too-small database)
         g.set_rotation(M, order, 1e9)
     saturated = True
@@ -75,10 +77,19 @@ def run_one(B0, P, factor, mode, seed, sat=None, below=None):
     R2 = (4.0 / 3.0) * gh2
     db = {R.canon(v) for v in g.itervalues()}
     short = set()
+    minlen2 = float("inf")
     for c in db:
         v = np.array(c, dtype=np.int64) @ Bn
-        if float(v @ v) <= R2:
+        l2 = float(v @ v)
+        minlen2 = min(minlen2, l2)
+        if l2 <= R2:
             short.add(c)
+    attempted = g.rotation_clones_attempted if mode != "base" else 0
+    # Clone work is real work. Cost model in "full scalar-product equivalents" (one = an n-term dot product, the
+    # unit of `fullscprods`): rebuilding a clone's Gram-Schmidt coordinates (recompute_all) ~ n/2; applying the
+    # rotation is ~1 with a cyclic shift (an optimised kernel) or ~n with the dense n x n matrix the patch uses.
+    ops_clone_opt = attempted * (n / 2.0 + 1.0)
+    ops_clone_dense = attempted * (n / 2.0 + n)
     closure = R.closure(short, M, order)
     orbits = len({min(R.closure([c], M, order)) for c in short})
     expected = (4.0 / 3.0) ** (n / 2.0) / 2.0
@@ -86,7 +97,9 @@ def run_one(B0, P, factor, mode, seed, sat=None, below=None):
     return {"factor": factor, "mode": mode, "seed": seed, "wall": wall, "ops": xpc + fsp,
             "xorpopcnt": xpc, "fullscprods": fsp, "short": len(short), "closure": len(closure), "orbits": orbits,
             "expected": expected, "ok": len(short) >= 0.95 * target, "clones": g.rotation_clones_added,
-            "saturation_error": not saturated, "db": len(db)}
+            "clones_attempted": attempted, "ops_incl_clones_opt": xpc + fsp + ops_clone_opt,
+            "ops_incl_clones_dense": xpc + fsp + ops_clone_dense, "minlen2": minlen2,
+            "saturation_error": not saturated, "db": len(db), "n": n}
 
 
 def main():
