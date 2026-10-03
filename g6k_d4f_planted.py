@@ -107,11 +107,24 @@ def to_np(IM):
 
 def prereduce(B):
     IM = IntegerMatrix.from_matrix(B.tolist())
-    LLL.reduction(IM)
     strat = os.environ.get("G6K_STRATEGIES") or BKZ.DEFAULT_STRATEGY
+    # Round 1 crashed here with "infinite loop in babai": double precision is not enough for this dimension/entry
+    # size.  Retry at higher precision (long double, then mpfr) instead of dying.
+    FTS = ("long double", "double", "mpfr")   # Round 1 crashed in plain double, so try the wider type first
+
+    def attempt(fn):
+        last = None
+        for ft in FTS:
+            try:
+                return fn(ft)
+            except (RuntimeError, ValueError) as exc:
+                last = exc
+        raise last
+
+    attempt(lambda ft: LLL.reduction(IM, float_type=ft))
     for bs in range(20, BPRE + 1, 4):
-        BKZ.reduction(IM, BKZ.Param(block_size=bs, strategies=strat, max_loops=2,
-                                    flags=BKZ.MAX_LOOPS | BKZ.AUTO_ABORT))
+        attempt(lambda ft: BKZ.reduction(IM, BKZ.Param(block_size=bs, strategies=strat, max_loops=2,
+                                                       flags=BKZ.MAX_LOOPS | BKZ.AUTO_ABORT), float_type=ft))
     return IM
 
 
