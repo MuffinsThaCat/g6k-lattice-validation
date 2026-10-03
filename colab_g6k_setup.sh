@@ -59,8 +59,11 @@ echo "configured G6K with -DENABLE_STATS"
 PYTHON=python3 ./bootstrap.sh -j "$(nproc)"
 
 step "5/5 smoke test (README example)"
+# G6K's activate script reads unset variables (e.g. CFLAGS), so relax nounset just while sourcing it
+set +u
 # shellcheck disable=SC1091
 source ./activate
+set -u
 python - <<'PY'
 from fpylll import IntegerMatrix, LLL, FPLLL
 from g6k import Siever
