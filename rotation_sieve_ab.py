@@ -1,0 +1,115 @@
+"""
+A/B test of IN-SIEVE ring-rotation augmentation in G6K's bgj1 (needs the patched kernel:
+Siever.set_rotation, see ROTATION_KERNEL_SPEC.md / rotation_kernel.patch).
+
+Same NTRU-type ideal lattice and sieve seed, with and without the hook, at several database sizes
+(db_size_factor). Per run: operations (xorpopcnt + fullscprods), wall time, how many SHORT vectors
+(|v|^2 <= 4/3 GH^2, G6K's saturation radius) the final database holds, the size of their rotation
+closure, whether the sieve got to its own stopping target, and how many rotated copies were inserted.
+
+  python rotation_sieve_ab.py        (cwd = patched g6k checkout, or G6K_DIR)
+Env: AB_D=24 AB_Q=257 AB_FACTORS="3.2,2.4,1.6,1.2" AB_SEEDS=3 AB_MODES="base,rot" AB_OUT=...json
+
+Reading the result. "ok" means the database ends with >= 95% of the short-vector count that the
+unmodified sieve's stopping rule asks for (0.5 * (4/3)^(n/2) / 2). With the hook, rotated copies are real
+database entries, so they legitimately count toward saturation: the question is how much work that
+saves, and how small a database the sieve can then survive on.
+"""
+import json
+import math
+import os
+import sys
+import time
+
+sys.path.insert(0, os.environ.get("G6K_DIR", os.getcwd()))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import numpy as np
+from fpylll import IntegerMatrix, LLL, BKZ
+from g6k import Siever
+from g6k.siever_params import SieverParams
+from g6k.siever import SaturationError
+
+import rotation_orbit_check as R
+
+D = int(os.environ.get("AB_D", "24"))
+Q = int(os.environ.get("AB_Q", "257"))
+FACTORS = [float(x) for x in os.environ.get("AB_FACTORS", "3.2,2.4,1.6,1.2").split(",")]
+SEEDS = int(os.environ.get("AB_SEEDS", "3"))
+MODES = os.environ.get("AB_MODES", "base,rot,rotall").split(",")
+OUT = os.environ.get("AB_OUT", "rotation_sieve_ab_results.json")
+THREADS = int(os.environ.get("AB_THREADS", "1"))
+SAT = float(os.environ.get("AB_SAT", "0.5"))   # requested saturation ratio of the sieve
+
+
+def run_one(B0, P, factor, mode, seed, sat=None, below=None):
+    sat = SAT if sat is None else sat
+    n = B0.shape[0]
+    A = IntegerMatrix.from_matrix(B0.tolist())
+    A = LLL.reduction(A)
+    BKZ.reduction(A, BKZ.Param(block_size=min(20, n)))
+    g = Siever(A, SieverParams(threads=THREADS, default_sieve="bgj1", reserved_n=n,
+                               db_size_factor=factor, saturation_ratio=sat), seed=seed)
+    g.initialize_local(0, 0, n)
+    # A was reduced in place by the Siever constructor; rotation matrix wrt THIS basis
+    Bn = np.array([[A[i, j] for j in range(n)] for i in range(n)], dtype=np.int64)
+    M = R.rotation_matrix(Bn, P)
+    order = 2 * (n // 2)
+    if below is not None and mode != "base":   # explicit clone threshold (normalised squared length)
+        g.set_rotation(M, order, below)
+    elif mode == "rot":          # clone new vectors shorter than G6K's saturation radius
+        g.set_rotation(M, order)
+    elif mode == "rotall":       # clone EVERY new database vector (amplifies a too-small database)
+        g.set_rotation(M, order, 1e9)
+    saturated = True
+    t0 = time.perf_counter()
+    try:
+        g(alg="bgj1")
+    except SaturationError:
+        saturated = False
+    wall = time.perf_counter() - t0
+    xpc = g.get_stat("xorpopcnt_total") or 0
+    fsp = g.get_stat("fullscprods_total") or 0
+    logdet = np.linalg.slogdet(Bn.astype(float))[1]
+    gh2 = math.exp(2.0 * math.lgamma(n / 2.0 + 1.0) / n) / math.pi * float(np.exp(2.0 * logdet / n))
+    R2 = (4.0 / 3.0) * gh2
+    db = {R.canon(v) for v in g.itervalues()}
+    short = set()
+    for c in db:
+        v = np.array(c, dtype=np.int64) @ Bn
+        if float(v @ v) <= R2:
+            short.add(c)
+    closure = R.closure(short, M, order)
+    orbits = len({min(R.closure([c], M, order)) for c in short})
+    expected = (4.0 / 3.0) ** (n / 2.0) / 2.0
+    target = sat * expected
+    return {"factor": factor, "mode": mode, "seed": seed, "wall": wall, "ops": xpc + fsp,
+            "xorpopcnt": xpc, "fullscprods": fsp, "short": len(short), "closure": len(closure), "orbits": orbits,
+            "expected": expected, "ok": len(short) >= 0.95 * target, "clones": g.rotation_clones_added,
+            "saturation_error": not saturated, "db": len(db)}
+
+
+def main():
+    d, n = D, 2 * D
+    B0, P = R.ideal_basis(d, Q, 1)
+    rows = []
+    print(f"d={d} n={n} q={Q}; expected short +-pairs ~{(4/3)**(n/2)/2:.0f}, sieve target ~"
+          f"{0.5*(4/3)**(n/2)/2:.0f}")
+    print(f"{'factor':>6} {'mode':>5} {'ok':>5} {'wall_s':>8} {'ops':>10} {'short':>6} {'closure':>8} {'orbits':>6} {'clones':>7}")
+    for f in FACTORS:
+        for mode in MODES:
+            rs = [run_one(B0, P, f, mode, 100 + s) for s in range(SEEDS)]
+            rows.extend(rs)
+            ok = sum(r["ok"] for r in rs)
+            print(f"{f:>6} {mode:>5} {ok:>3}/{len(rs)} {np.mean([r['wall'] for r in rs]):>8.3f} "
+                  f"{np.mean([r['ops'] for r in rs]):>10.3g} {np.mean([r['short'] for r in rs]):>6.0f} "
+                  f"{np.mean([r['closure'] for r in rs]):>8.0f} {np.mean([r['orbits'] for r in rs]):>6.1f} "
+                  f"{np.mean([r['clones'] for r in rs]):>7.0f}",
+                  flush=True)
+    with open(OUT, "w") as fh:
+        json.dump({"d": d, "q": Q, "rows": rows}, fh, indent=1, default=str)
+    print(f"Wrote {OUT}")
+
+
+if __name__ == "__main__":
+    main()
