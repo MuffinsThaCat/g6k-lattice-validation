@@ -20,21 +20,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 D = int(os.environ["TTS_D"])
 Q = int(os.environ.get("TTS_Q", "257"))
+LAT = int(os.environ.get("TTS_LATTICE", "1"))   # seed of the random ring element h (which lattice)
 MODES = os.environ.get("TTS_MODES", "base,rot,rotmid,rotall").split(",")
 TUNE = os.environ.get("TTS_TUNE", "0") == "1"
 HOLDOUT = int(os.environ.get("TTS_HOLDOUT_SEEDS", "16"))
 NPROC = int(os.environ.get("TTS_NPROC", "4"))
 TIMEOUT = float(os.environ.get("TTS_TIMEOUT", "3000"))
-OUT = os.environ.get("TTS_OUT", f"res_tts_d{D}.json")
+OUT = os.environ.get("TTS_OUT", f"res_tts_d{D}_lat{LAT}.json")
 SAT = 0.5
 FACTOR = 3.2
 
 
-def child(q, d, mode, seed):
+def child(q, d, mode, seed, lat):
     try:
         import rotation_sieve_ab as AB
         import rotation_orbit_check as R
-        B0, P = R.ideal_basis(d, Q, 1)
+        B0, P = R.ideal_basis(d, Q, lat)
         q.put(AB.run_one(B0, P, FACTOR, mode, seed, sat=SAT))
     except BaseException as exc:  # report, never hide
         q.put({"error": f"{type(exc).__name__}: {exc}"[:300]})
@@ -45,7 +46,7 @@ def main():
     if TUNE:
         tasks += [("tune", m, s) for s in range(100, 108) for m in MODES]
     tasks += [("holdout", m, s) for s in range(200, 200 + HOLDOUT) for m in MODES]
-    print(f"d={D} n={2 * D}: {len(tasks)} runs, {NPROC} parallel, timeout {TIMEOUT:.0f}s", flush=True)
+    print(f"d={D} lattice={LAT} n={2 * D}: {len(tasks)} runs, {NPROC} parallel, timeout {TIMEOUT:.0f}s", flush=True)
     ctx = mp.get_context("fork")
     running, rows, pending = [], [], list(tasks)
     t0 = time.time()
@@ -53,7 +54,7 @@ def main():
         while pending and len(running) < NPROC:
             sset, mode, seed = pending.pop(0)
             q = ctx.Queue()
-            p = ctx.Process(target=child, args=(q, D, mode, seed))
+            p = ctx.Process(target=child, args=(q, D, mode, seed, LAT))
             p.start()
             running.append((p, q, sset, mode, seed, time.time()))
         time.sleep(0.5)
@@ -77,12 +78,12 @@ def main():
             if not done:
                 still.append((p, q, sset, mode, seed, ts))
                 continue
-            r.update(set=sset, mode=mode, seed=seed, d=D)
+            r.update(set=sset, mode=mode, seed=seed, d=D, lat=LAT)
             rows.append(r)
             tag = "TIMEOUT" if r.get("timeout") else (r.get("error") or f"wall {r['wall']:.1f}s ops {r['ops']:.3g} clones {r['clones_attempted']}")
             print(f"[{time.time() - t0:7.0f}s] {sset:7} {mode:7} seed {seed}: {tag}", flush=True)
             with open(OUT, "w") as fh:
-                json.dump({"d": D, "q": Q, "sat": SAT, "factor": FACTOR, "rows": rows}, fh)
+                json.dump({"d": D, "lat": LAT, "q": Q, "sat": SAT, "factor": FACTOR, "rows": rows}, fh)
         running = still
     print(f"Wrote {OUT} ({len(rows)} runs)")
 
