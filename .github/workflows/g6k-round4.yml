@@ -33,7 +33,11 @@ jobs:
         run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
       - name: Subgroup time-to-solution runs
         run: |
+          # rotation_tts.py must run inside g6k/ (it finds G6K via the cwd), but the upload and the check
+          # below look in the workspace root: write the result there (run 37162523987 lost all 5 results
+          # because the default relative path landed in g6k/).
           bash -c 'cd g6k && source ./activate && \
+            TTS_OUT="$GITHUB_WORKSPACE/res_tts_d32_lat1_g${{ matrix.g }}.json" \
             timeout 19000 python ../rotation_tts.py' 2>&1 | tee run_g${{ matrix.g }}.log
       - name: Upload results
         if: always()
