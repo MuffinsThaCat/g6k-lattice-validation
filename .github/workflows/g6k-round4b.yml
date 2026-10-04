@@ -1,0 +1,59 @@
+name: g6k-round4b
+
+# Manual trigger only.  Criteria: PREREGISTERED_CRITERIA_R4B.md (written before any of these runs).
+# Same as g6k-round4.yml except: each job also runs the baseline (TTS_MODES="base,rotall"), and g = 64
+# (the full group, TTS_GROUP = 0) is its own job, so every gain compares runs from the same runner.
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  r4b:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {g: 2, group: 2}
+          - {g: 4, group: 4}
+          - {g: 8, group: 8}
+          - {g: 16, group: 16}
+          - {g: 32, group: 32}
+          - {g: 64, group: 0}
+    env:
+      TTS_D: 32
+      TTS_LATTICE: 1
+      TTS_MODES: base,rotall
+      TTS_GROUP: ${{ matrix.group }}
+      TTS_HOLDOUT_SEEDS: 16
+      TTS_TIMEOUT: 3000
+      TTS_NPROC: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build G6K (counters + rotation patch with clone counter)
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: Baseline + subgroup time-to-solution runs (same runner)
+        run: |
+          # rotation_tts.py must run inside g6k/ (it finds G6K via the cwd); write the result to the workspace root.
+          bash -c 'cd g6k && source ./activate && \
+            TTS_OUT="$GITHUB_WORKSPACE/res_tts_d32_lat1_g${{ matrix.g }}.json" \
+            timeout 19000 python ../rotation_tts.py' 2>&1 | tee run_g${{ matrix.g }}.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r4b-g${{ matrix.g }}
+          path: |
+            res_tts_*.json
+            run_*.log
+      - name: Fail if the experiment crashed or wrote nothing
+        run: |
+          if grep -q "Traceback" run_g${{ matrix.g }}.log; then echo "EXPERIMENT CRASHED"; exit 1; fi
+          test -s res_tts_d32_lat1_g${{ matrix.g }}.json || { echo "NO RESULTS"; exit 1; }
