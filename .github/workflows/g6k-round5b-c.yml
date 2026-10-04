@@ -1,0 +1,61 @@
+name: g6k-round5b-c
+
+# Manual trigger only.  Completes the d256 set of g6k-round5-c (run 37169226764), which finished only
+# 8 of 32 instances inside the 6 h job limit. Same code, parameters and criteria
+# (PREREGISTERED_CRITERIA_R5.md; note in PREREGISTERED_CRITERIA_R5b.md); only the 24 seeds that did
+# not finish are run, one instance per process, with a longer per-process timeout.
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  measure:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {job: 0, seeds: "9000 9001 9002 9004"}
+          - {job: 1, seeds: "9005 9006 9007 9008"}
+          - {job: 2, seeds: "9009 9010 9011 9012"}
+          - {job: 3, seeds: "9013 9014 9015 9020"}
+          - {job: 4, seeds: "9021 9022 9023 9024"}
+          - {job: 5, seeds: "9025 9027 9030 9031"}
+    env:
+      G6K_FPLLL_BELOW: "0"
+      G6K_FT: dd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build G6K
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: Measure (4 processes, one instance each)
+        run: |
+          export G6K_DIR="$GITHUB_WORKSPACE/g6k"
+          cd g6k && set +eu && source ./activate && set -eu && cd ..
+          python -m pip install -q scipy
+          for s in ${{ matrix.seeds }}; do
+            timeout 19800 python g6k_measure_c_shard.py 128 1 128 3329 2.0 90 $s 1 \
+              res_d256_j${{ matrix.job }}_s$s.jsonl > run_d256_j${{ matrix.job }}_s$s.log 2>&1 &
+          done
+          wait || true
+          wc -l res_*.jsonl || true
+          tail -n 20 run_*.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r5b-d256-j${{ matrix.job }}
+          path: |
+            res_*.jsonl
+            run_*.log
+            setup.log
+      - name: Fail if the experiment crashed
+        run: |
+          if grep -l "Traceback" run_*.log; then echo "EXPERIMENT CRASHED (see logs above)"; exit 1; fi
