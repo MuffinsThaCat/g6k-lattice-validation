@@ -1,0 +1,97 @@
+name: g6k-round5-c
+
+# Manual trigger only.  Criteria: PREREGISTERED_CRITERIA_R5.md (written before any of these runs).
+# 14 measurement jobs (4 processes each, one instance per process at a time) + 1 summary job.
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  measure:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {tag: d128a, job: 0, n: 32,  k: 2, m: 64,  q: 3329, sigma: "4.0", bmax: 45, seed0: 5000, per: 8, ft: double}
+          - {tag: d128b, job: 0, n: 64,  k: 1, m: 64,  q: 3329, sigma: "4.2", bmax: 45, seed0: 5000, per: 8, ft: double}
+          - {tag: d160,  job: 0, n: 32,  k: 3, m: 64,  q: 3329, sigma: "2.0", bmax: 75, seed0: 7000, per: 2, ft: double}
+          - {tag: d160,  job: 1, n: 32,  k: 3, m: 64,  q: 3329, sigma: "2.0", bmax: 75, seed0: 7008, per: 2, ft: double}
+          - {tag: d160,  job: 2, n: 32,  k: 3, m: 64,  q: 3329, sigma: "2.0", bmax: 75, seed0: 7016, per: 2, ft: double}
+          - {tag: d160,  job: 3, n: 32,  k: 3, m: 64,  q: 3329, sigma: "2.0", bmax: 75, seed0: 7024, per: 2, ft: double}
+          - {tag: d256,  job: 0, n: 128, k: 1, m: 128, q: 3329, sigma: "2.0", bmax: 90, seed0: 9000, per: 1, ft: dd}
+          - {tag: d256,  job: 1, n: 128, k: 1, m: 128, q: 3329, sigma: "2.0", bmax: 90, seed0: 9004, per: 1, ft: dd}
+          - {tag: d256,  job: 2, n: 128, k: 1, m: 128, q: 3329, sigma: "2.0", bmax: 90, seed0: 9008, per: 1, ft: dd}
+          - {tag: d256,  job: 3, n: 128, k: 1, m: 128, q: 3329, sigma: "2.0", bmax: 90, seed0: 9012, per: 1, ft: dd}
+          - {tag: d256,  job: 4, n: 128, k: 1, m: 128, q: 3329, sigma: "2.0", bmax: 90, seed0: 9016, per: 1, ft: dd}
+          - {tag: d256,  job: 5, n: 128, k: 1, m: 128, q: 3329, sigma: "2.0", bmax: 90, seed0: 9020, per: 1, ft: dd}
+          - {tag: d256,  job: 6, n: 128, k: 1, m: 128, q: 3329, sigma: "2.0", bmax: 90, seed0: 9024, per: 1, ft: dd}
+          - {tag: d256,  job: 7, n: 128, k: 1, m: 128, q: 3329, sigma: "2.0", bmax: 90, seed0: 9028, per: 1, ft: dd}
+    env:
+      G6K_FPLLL_BELOW: "0"
+      G6K_FT: ${{ matrix.ft }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build G6K
+        run: bash colab_g6k_setup.sh 2>&1 | tee setup.log
+      - name: Measure (4 processes, each appends one JSON line per finished instance)
+        run: |
+          export G6K_DIR="$GITHUB_WORKSPACE/g6k"
+          cd g6k && set +eu && source ./activate && set -eu && cd ..
+          python -m pip install -q scipy
+          for p in 0 1 2 3; do
+            s=$(( ${{ matrix.seed0 }} + p * ${{ matrix.per }} ))
+            timeout 18500 python g6k_measure_c_shard.py ${{ matrix.n }} ${{ matrix.k }} ${{ matrix.m }} \
+              ${{ matrix.q }} ${{ matrix.sigma }} ${{ matrix.bmax }} $s ${{ matrix.per }} \
+              res_${{ matrix.tag }}_j${{ matrix.job }}_p$p.jsonl > run_${{ matrix.tag }}_j${{ matrix.job }}_p$p.log 2>&1 &
+          done
+          wait || true
+          wc -l res_*.jsonl || true
+          tail -n 20 run_*.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r5-${{ matrix.tag }}-j${{ matrix.job }}
+          path: |
+            res_*.jsonl
+            run_*.log
+            setup.log
+      - name: Fail if the experiment crashed or wrote nothing
+        run: |
+          if grep -l "Traceback" run_*.log; then echo "EXPERIMENT CRASHED (see logs above)"; exit 1; fi
+          ls res_*.jsonl >/dev/null 2>&1 || { echo "NO RESULTS"; exit 1; }
+
+  summary:
+    needs: measure
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: python -m pip install -q numpy scipy
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Aggregate per set
+        run: |
+          for tag in d128a d128b d160 d256; do
+            cat artifacts/r5-$tag-*/res_*.jsonl > all_$tag.jsonl 2>/dev/null || true
+            echo "===== $tag: $(wc -l < all_$tag.jsonl 2>/dev/null || echo 0) instances"
+            if [ -s all_$tag.jsonl ]; then python aggregate_c_jsonl.py all_$tag.jsonl || echo "aggregate failed for $tag"; fi
+          done 2>&1 | tee SUMMARY.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r5-summary
+          path: |
+            SUMMARY.txt
+            all_*.jsonl
